@@ -1,5 +1,5 @@
 {
-  "name": "@keshavsoft/json-api-builder-insert-content",
+  "name": "json-api-builder-insert-content",
   "version": "1.0.0",
   "description": "Insert content stage for JSON API Builder.",
   "type": "module",
