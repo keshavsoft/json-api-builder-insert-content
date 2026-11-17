@@ -6,76 +6,83 @@
 [![GitHub Repository](https://img.shields.io/badge/GitHub-keshavsoft%2Fjson-api-builder-insert-content-181717.svg?style=flat-square&logo=github)](https://github.com/keshavsoft/json-api-builder-insert-content)
 [![Documentation](https://img.shields.io/badge/docs-live_portal-amber.svg?style=flat-square)](https://keshavsoft.github.io/json-api-builder-insert-content/)
 
-> **Stage 3 of 8**: Stage 3: ESTree AST Template Compilation & Router Content Insertion
+> **Stage 3 of 8**: ESTree AST Template Compilation & Router Content Insertion via Astring
 
 Part of the modular **[JSON API Builder](https://github.com/keshavsoft/json-api-builder-orchestrator)** ecosystem by [KeshavSoft](https://github.com/keshavsoft).
 
 ---
 
-## The Story
+## 1. The Core Story: Why AST & Why Astring?
 
-Transforms ESTree-compatible AST JSON template definitions into clean JavaScript code and inserts them into target route files using Astring.
+### The Problem With String-Based Code Generation
+Traditional code generation tools treat code as raw strings (using string concatenation, regex templates, or template literals like `\`import ...\``). This naive approach inevitably suffers from critical flaws:
+1. **Escaped Quote Nightmares**: Inconsistent single, double, and backtick quotes break syntax easily.
+2. **Formatting Drift**: Indentation, comma placement, and newline inconsistencies lead to malformed files.
+3. **Fragile Templates**: A single missing semicolon or misplaced character fails silently at generation time and crashes at runtime.
 
-### The Problem It Solves
-String interpolation or regex replacement in code generators creates syntax errors, unescaped characters, and fragile templates that break on formatting changes.
+### Why We Ditched Babel AST (`@babel/generator`)
+When exploring Abstract Syntax Tree (AST) approaches, the industry default is often Babel (`@babel/core`, `@babel/generator`, `@babel/traverse`). However, Babel introduces massive architectural friction:
+- **Massive Dependency Footprint**: Babel pulls in dozens of packages totaling **over 50 MB** of `node_modules` overhead.
+- **Complex Non-Standard AST Dialect**: Babel deviates from the official ESTree specification with proprietary node types (`StringLiteral` vs `Literal`, custom directives, etc.).
+- **Significant Performance Penalty**: Babel was designed to transpile entire legacy applications, making it orders of magnitude slower than necessary for straightforward AST code generation.
 
-### The Solution
-Uses authentic ESTree Abstract Syntax Trees as the source template format. Astring converts the AST into clean JavaScript and writes formatted Hono router boilerplate into each route file.
-
----
-
-## Architecture & Pipeline Position
-
-```
-[1. Folders] ──▶ [2. Files] ──▶ [3. Content] ──▶ [4. Hook Routes]
-                                                         │
-[8. Orchestrator] ◀── [7. Validate] ◀── [6. Endpoints] ◀── [5. App]
-```
-
-**This repository implements Stage 3 in isolation.** It can be used independently in custom build workflows or composed automatically via `json-api-builder`.
-
----
-
-## Installation
-
-```bash
-npm install json-api-builder-insert-content
-```
+### The Solution: Astring (`astring`)
+Instead of bloated toolchains or fragile string concatenation, **`json-api-builder-insert-content`** adopts **[`astring`](https://github.com/davidbonnet/astring)**:
+- **Tiny (~10 KB)**: Completely self-contained with **zero external dependencies**.
+- **Official ESTree Compliance**: Directly understands standard ESTree AST JSON nodes (`Program`, `ImportDeclaration`, `VariableDeclaration`, `ExportDefaultDeclaration`).
+- **Blazing Performance**: Generates clean, production-grade JavaScript **up to 50x faster** than `@babel/generator`.
+- **Guaranteed Syntax**: If the AST JSON is valid, the resulting JavaScript code is **100% syntactically valid** by definition.
 
 ---
 
-## Quick Start
+## 2. Architecture & Pipeline Position
 
-```js
-import { insertContent } from "json-api-builder-insert-content";
-
-const result = insertContent({
-    clientRoot: "./my-project",
-    outputRoot: "./my-project/output"
-});
-
-console.log("Inserted router boilerplate into files.");
+```text
+[0. Validate] ──▶ [1. Folders] ──▶ [2. Files] ──▶ [3. Insert Content (Astring)] ──▶ [4. Hook Routes]
+                                                                                            │
+[8. Finished App] ◀── [7. Verify] ◀── [6. Endpoints] ◀── [5. Create App] ◀──────────────────┘
 ```
+
+**Stage 3's Single Responsibility**:
+Takes the empty target files touched in Stage 2, reads the AST blueprint from `source-of-truth/routes.estree.json`, compiles it via `astring.generate()`, and writes production-ready Hono router code into each route file.
 
 ---
 
-## Input Specification
+## 3. How It Works in Code
 
-routes.estree.json containing valid ESTree AST nodes.
+### The Input: ESTree Blueprint (`source-of-truth/routes.estree.json`)
+The template is stored directly as an official ESTree JSON AST:
 
 ```json
 {
   "type": "Program",
+  "sourceType": "module",
   "body": [
     {
       "type": "ImportDeclaration",
-      "specifiers": [{ "type": "ImportSpecifier", "imported": { "name": "Hono" } }],
+      "specifiers": [
+        {
+          "type": "ImportSpecifier",
+          "imported": { "type": "Identifier", "name": "Hono" },
+          "local": { "type": "Identifier", "name": "Hono" }
+        }
+      ],
       "source": { "type": "Literal", "value": "hono" }
     },
     {
       "type": "VariableDeclaration",
-      "declarations": [{ "id": { "name": "app" }, "init": { "type": "NewExpression", "callee": { "name": "Hono" } } }],
-      "kind": "const"
+      "kind": "const",
+      "declarations": [
+        {
+          "type": "VariableDeclarator",
+          "id": { "type": "Identifier", "name": "app" },
+          "init": {
+            "type": "NewExpression",
+            "callee": { "type": "Identifier", "name": "Hono" },
+            "arguments": []
+          }
+        }
+      ]
     },
     {
       "type": "ExportDefaultDeclaration",
@@ -85,13 +92,27 @@ routes.estree.json containing valid ESTree AST nodes.
 }
 ```
 
----
+### The Engine: Pure Astring Compilation
+The engine reads the AST definition and transforms it in one single, reliable call:
 
-## Output Transformation
+```javascript
+import fs from "node:fs";
+import { generate } from "astring";
 
-Formatted, idiomatic JavaScript router boilerplate ready for route composition.
+// 1. Read authentic ESTree AST JSON
+const ast = JSON.parse(fs.readFileSync(definitionPath, "utf8"));
 
-```text
+// 2. Compile AST directly into pristine JavaScript
+const javascript = generate(ast);
+
+// 3. Write target route module
+fs.writeFileSync(targetFilePath, javascript, "utf8");
+```
+
+### The Output: Pristine Generated JavaScript
+Every scaffolded `routes.js` file instantly receives:
+
+```javascript
 import { Hono } from "hono";
 
 const app = new Hono();
@@ -101,53 +122,29 @@ export default app;
 
 ---
 
-## API Reference
-
-### `insertContent`
-
-Accepts an options object with the following configuration:
-
-| Option | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `clientRoot` | `string` | `process.cwd()` | Root path of the client project. |
-| `outputRoot` | `string` | `path.join(clientRoot, 'output')` | Target output directory. |
-| `templatesRoot` | `string` | `input/source-of-truth/templates` | Directory containing ESTree AST JSON template files. |
-
----
-
-## Sibling Pipeline Packages
-
-| Stage | Package | Description |
-| :---: | :--- | :--- |
-| **01** | [json-api-builder-create-folders](https://github.com/keshavsoft/json-api-builder-create-folders) | Directory hierarchy scaffolding |
-| **02** | [json-api-builder-create-files](https://github.com/keshavsoft/json-api-builder-create-files) | Non-destructive placeholder file creation |
-| **03** | [json-api-builder-insert-content](https://github.com/keshavsoft/json-api-builder-insert-content) | ESTree template to JavaScript insertion |
-| **04** | [json-api-builder-alter-content](https://github.com/keshavsoft/json-api-builder-alter-content) | Hierarchical route hooking & AST imports |
-| **05** | [json-api-builder-create-app](https://github.com/keshavsoft/json-api-builder-create-app) | Root app.js assembly & server runtime |
-| **06** | [json-api-builder-create-endpoints](https://github.com/keshavsoft/json-api-builder-create-endpoints) | CRUD endpoints & local JSON file sync |
-| **07** | [json-api-builder-validation](https://github.com/keshavsoft/json-api-builder-validation) | Specification linting & artifact checks |
-| **08** | [json-api-builder](https://github.com/keshavsoft/json-api-builder-orchestrator) | Master orchestrator coordinating all stages |
-
----
-
-## Development & Testing
+## 4. Installation & Usage
 
 ```bash
-# Install dependencies
-npm install
+npm install json-api-builder-insert-content
+```
 
-# Run automated tests
-npm test
+```javascript
+import { insertContent } from "json-api-builder-insert-content";
 
-# Run syntax check
-npm run check
+const result = insertContent({
+    clientRoot: "./my-project",
+    outputRoot: "./my-project/output"
+});
 
-# Prepublish verification
-npm run prepublishOnly
+console.log("Stage 3 completed: AST templates compiled via Astring.");
 ```
 
 ---
 
-## License
+## 5. Verification & Tests
 
-[MIT](LICENSE) © 2026 [KeshavSoft](https://github.com/keshavsoft)
+To run the built-in syntax checks and unit tests:
+```bash
+npm run check
+npm test
+```
